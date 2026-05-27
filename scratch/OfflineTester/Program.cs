@@ -106,6 +106,11 @@ namespace UnityEngine
             return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? 2.0f * v : -2.0f * v);
         }
     }
+
+    public class MonoBehaviour
+    {
+        public T FindObjectOfType<T>() where T : class => null;
+    }
 }
 
 // =============================================================================================
@@ -199,6 +204,54 @@ namespace RPG.Map
         public static bool IsValidCoordinate(int x, int y)
         {
             return x >= 0 && x < MAP_SIZE && y >= 0 && y < MAP_SIZE;
+        }
+    }
+
+    public class MapRenderer : UnityEngine.MonoBehaviour
+    {
+        public void RenderAllLayers() {}
+    }
+
+    public class MapGenerator : UnityEngine.MonoBehaviour
+    {
+        public bool generateOnStart = true;
+        public long seed = 114514L;
+
+        private MapRenderer _mapRenderer;
+
+        public void Start()
+        {
+            _mapRenderer = FindObjectOfType<MapRenderer>();
+            if (generateOnStart)
+            {
+                GenerateMap(seed);
+            }
+        }
+
+        public void GenerateMap(long mapSeed)
+        {
+            MapDataStore store = MapDataStore.Instance;
+            if (store == null) return;
+
+            store.CurrentSeed = mapSeed;
+
+            store.TerrainLayer = new TerrainType[MapDataStore.MAP_SIZE, MapDataStore.MAP_SIZE];
+            store.RawClimateLayer = new ClimateData[MapDataStore.MAP_SIZE, MapDataStore.MAP_SIZE];
+            store.ResourceLayer = new ResourceData[MapDataStore.MAP_SIZE, MapDataStore.MAP_SIZE];
+            store.BuildingLayer = new BuildingData[MapDataStore.MAP_SIZE, MapDataStore.MAP_SIZE];
+            store.MonsterFogLayer = new MonsterFogData[MapDataStore.MAP_SIZE, MapDataStore.MAP_SIZE];
+
+            Terrain.TerrainLayerGen.Generate(mapSeed, store);
+            Resource.ResourceLayerGen.Generate(mapSeed, store);
+            Building.BuildingLayerGen.Generate(mapSeed, store);
+            MonsterFog.MonsterFogLayerGen.Generate(mapSeed, store);
+
+            store.ClimateController = new StaticClimateController(store.RawClimateLayer);
+
+            if (_mapRenderer != null)
+            {
+                _mapRenderer.RenderAllLayers();
+            }
         }
     }
 }
