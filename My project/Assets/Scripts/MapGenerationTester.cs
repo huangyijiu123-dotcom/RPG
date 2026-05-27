@@ -85,6 +85,9 @@ namespace RPG.Map.Test
 
                 // 用例 11：测试第三层世界极客奇观生成数量、偏远圈层限制、去资源纯空草原以及两两间距限制 (区间 [2, 4])
                 Test_Layer3_WondersCountAndConstraints(store);
+
+                // 用例 12：测试第四层迷雾覆盖、大本营安全区开雾、水域/建筑避让、三段式分段硬阈值与怪物ID确定性分级验证 (T25~T32)
+                Test_Layer4_MonsterFogConstraints(store);
             }
             catch (System.Exception ex)
             {
@@ -712,6 +715,224 @@ namespace RPG.Map.Test
             Assert(isSpacingOk, "Test_Layer3_WondersCountAndConstraints",
                 "奇观间距校验成功！所有世界级极客奇观的两两切比雪夫间距均严格 >= 20 格，空间探索感极佳",
                 $"奇观间距过近！错误细节: {failDetail}");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        // 🧪 测试用例 12：第四层迷雾覆盖、大本营安全区开雾、水域/建筑避让、三段式分段硬阈值与怪物ID确定性分级验证 (T25~T32)
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        private void Test_Layer4_MonsterFogConstraints(MapDataStore store)
+        {
+            long testSeed = 114514L;
+            TerrainLayerGen.Generate(testSeed, store);
+            ResourceLayerGen.Generate(testSeed, store);
+            BuildingLayerGen.Generate(testSeed, store);
+            MonsterFogLayerGen.Generate(testSeed, store);
+
+            int cx = MapDataStore.CENTER;
+            int cy = MapDataStore.CENTER;
+            int size = MapDataStore.MAP_SIZE;
+
+            // T25 (战争迷雾初始覆盖) & T26 (安全区开雾半径验证) & T27 (水域绝对无怪隔离) & T28 (世界建筑格无怪与健康状态)
+            bool t25Ok = true;
+            bool t26Ok = true;
+            bool t27Ok = true;
+            bool t28Ok = true;
+            bool t29Ok = true;
+            bool t30Ok = true;
+            bool t31Ok = true;
+
+            string failDetail = "";
+
+            float monsterOffset = (float)((testSeed * 37L) % 10000L);
+            float scale = 0.10f;
+
+            for (int x = 0; x < size; x++)
+            {
+                for (int y = 0; y < size; y++)
+                {
+                    MonsterFogData fog = store.MonsterFogLayer[x, y];
+                    int ringDist = Mathf.Max(Mathf.Abs(x - cx), Mathf.Abs(y - cy));
+
+                    // T26: 安全区 ringDistance <= 10 必须全开雾
+                    if (ringDist <= 10)
+                    {
+                        if (!fog.IsExplored)
+                        {
+                            t26Ok = false;
+                            failDetail = $"安全区格 ({x}, {y}) ringDistance={ringDist} 竟然未被开雾 (IsExplored == false)";
+                            break;
+                        }
+                    }
+                    // T25: 安全区外初始黑雾
+                    else
+                    {
+                        if (fog.IsExplored)
+                        {
+                            t25Ok = false;
+                            failDetail = $"安全区外格 ({x}, {y}) ringDistance={ringDist} 竟然已开雾 (IsExplored == true)";
+                            break;
+                        }
+                    }
+
+                    // T27: 水域绝对无怪
+                    if (store.TerrainLayer[x, y] == TerrainType.WATER)
+                    {
+                        if (fog.HasMonster)
+                        {
+                            t27Ok = false;
+                            failDetail = $"水域格 ({x}, {y}) 竟然刷新了怪物 {fog.MonsterType}";
+                            break;
+                        }
+                    }
+
+                    // T28: 已有建筑格绝对无怪且 IsBuildingBlocked 为健康的 false
+                    if (store.BuildingLayer[x, y].HasBuilding)
+                    {
+                        if (fog.HasMonster)
+                        {
+                            t28Ok = false;
+                            failDetail = $"建筑格 ({x}, {y}) ({store.BuildingLayer[x, y].BuildingType}) 竟然刷新了怪物 {fog.MonsterType}";
+                            break;
+                        }
+                        if (store.BuildingLayer[x, y].IsBuildingBlocked)
+                        {
+                            t28Ok = false;
+                            failDetail = $"建筑格 ({x}, {y}) ({store.BuildingLayer[x, y].BuildingType}) 的 IsBuildingBlocked 竟然在开图时被设为了 true";
+                            break;
+                        }
+                    }
+
+                    // T29 & T30 & T31: 怪物刷新条件与分段硬阈值校验
+                    if (fog.HasMonster)
+                    {
+                        // 圈层 10 格内绝对不可能刷怪
+                        if (ringDist <= 10)
+                        {
+                            t29Ok = false;
+                            failDetail = $"安全区内 ({x}, {y}) 竟然刷新了怪物 {fog.MonsterType}";
+                            break;
+                        }
+
+                        // 噪声值校验
+                        float noise = Mathf.Clamp01(Mathf.PerlinNoise(x * scale + monsterOffset, y * scale + monsterOffset));
+
+                        // 近圈 10~25
+                        if (ringDist <= 25)
+                        {
+                            if (noise <= 0.75f)
+                            {
+                                t29Ok = false;
+                                failDetail = $"近圈格子 ({x}, {y}) 噪声值仅为 {noise} (<= 0.75f) 却强行刷新了怪";
+                                break;
+                            }
+                            if (fog.DangerLevel != 1 || fog.MonsterType != "SLIME")
+                            {
+                                t29Ok = false;
+                                failDetail = $"近圈怪物格 ({x}, {y}) DangerLevel={fog.DangerLevel}, Type={fog.MonsterType} 与 SLIME (Level 1) 不符";
+                                break;
+                            }
+                        }
+                        // 中圈 25~50
+                        else if (ringDist <= 50)
+                        {
+                            if (noise <= 0.60f)
+                            {
+                                t30Ok = false;
+                                failDetail = $"中圈格子 ({x}, {y}) 噪声值仅为 {noise} (<= 0.60f) 却强行刷新了怪";
+                                break;
+                            }
+                            bool isMidMonsterOk = (fog.DangerLevel == 2 && fog.MonsterType == "BUG_KNIGHT") || 
+                                                  (fog.DangerLevel == 3 && fog.MonsterType == "NULL_GHOST");
+                            if (!isMidMonsterOk)
+                            {
+                                t30Ok = false;
+                                failDetail = $"中圈怪物格 ({x}, {y}) DangerLevel={fog.DangerLevel}, Type={fog.MonsterType} 不属于 BUG_KNIGHT(2) 或 NULL_GHOST(3)";
+                                break;
+                            }
+                        }
+                        // 外圈 50+
+                        else
+                        {
+                            if (noise <= 0.45f)
+                            {
+                                t31Ok = false;
+                                failDetail = $"外圈格子 ({x}, {y}) 噪声值仅为 {noise} (<= 0.45f) 却强行刷新了怪";
+                                break;
+                            }
+                            bool isFarMonsterOk = (fog.DangerLevel == 3 && fog.MonsterType == "NULL_GHOST") ||
+                                                  (fog.DangerLevel == 4 && fog.MonsterType == "DEADLOCK_GOLEM") ||
+                                                  (fog.DangerLevel == 5 && fog.MonsterType == "MEMORY_LEAK_TITAN");
+                            if (!isFarMonsterOk)
+                            {
+                                t31Ok = false;
+                                failDetail = $"外圈怪物格 ({x}, {y}) DangerLevel={fog.DangerLevel}, Type={fog.MonsterType} 不属于 NULL_GHOST(3)/DEADLOCK_GOLEM(4)/MEMORY_LEAK_TITAN(5)";
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!t25Ok || !t26Ok || !t27Ok || !t28Ok || !t29Ok || !t30Ok || !t31Ok) break;
+            }
+
+            Assert(t25Ok, "T25_MonsterFog_InitialFogOutsideSafeZone",
+                "战争迷雾初始覆盖校验成功！大本营安全区（ringDistance > 10）以外的所有迷雾状态均为未探索黑雾",
+                $"迷雾未覆盖验证失败！错误细节: {failDetail}");
+
+            Assert(t26Ok, "T26_MonsterFog_SafeZoneRevealed",
+                "安全区开雾半径验证成功！所有 ringDistance <= 10 的格子全部被默认探索开雾",
+                $"安全区探索未开验证失败！错误细节: {failDetail}");
+
+            Assert(t27Ok, "T27_MonsterFog_WaterHasNoMonster",
+                "水域绝对无怪隔离校验成功！全图所有的水域（WATER）瓦片绝对没有刷新任何极客怪物",
+                $"水域刷怪限制失败！错误细节: {failDetail}");
+
+            Assert(t28Ok, "T28_MonsterFog_BuildingCellsSafeAndHealthy",
+                "世界建筑格无怪与健康状态校验成功！所有大本营、城邦与文明遗迹格子开图均无怪物，且 IsBuildingBlocked 完好无损（false）",
+                $"建筑格刷怪与阻挡状态校验失败！错误细节: {failDetail}");
+
+            Assert(t29Ok, "T29_MonsterFog_NearZoneMonsterAndLevel",
+                "近圈（10~25）怪物判定校验成功！所有近圈怪物格 DangerLevel 均为 1 且全为极客 SLIME (黏液怪)，且阈值严格 > 0.75f",
+                $"近圈刷怪规则验证失败！错误细节: {failDetail}");
+
+            Assert(t30Ok, "T30_MonsterFog_MidZoneMonsterAndLevel",
+                "中圈（25~50）怪物确定性校验成功！所有中圈怪物格的 DangerLevel 均严格属于 [2, 3] 区间且全为极客 BUG_KNIGHT 或 NULL_GHOST，阈值严格 > 0.60f",
+                $"中圈刷怪规则验证失败！错误细节: {failDetail}");
+
+            Assert(t31Ok, "T31_MonsterFog_FarZoneMonsterAndLevel",
+                "外圈（50+）怪物与巨兽BOSS校验成功！所有外圈怪物格 DangerLevel 严格分配在 [3, 4, 5] 并映射极客幽灵/死锁魔像/内存泄漏巨兽，且阈值严格 > 0.45f",
+                $"外圈刷怪规则验证失败！错误细节: {failDetail}");
+
+            // T32: 验证种子哈希一致性
+            bool t32Ok = true;
+            MapDataStore store2 = store.gameObject.AddComponent<MapDataStore>();
+            store2.InitArrays();
+            TerrainLayerGen.Generate(testSeed, store2);
+            ResourceLayerGen.Generate(testSeed, store2);
+            BuildingLayerGen.Generate(testSeed, store2);
+            MonsterFogLayerGen.Generate(testSeed, store2);
+
+            for (int x = 0; x < size; x++)
+            {
+                for (int y = 0; y < size; y++)
+                {
+                    MonsterFogData f1 = store.MonsterFogLayer[x, y];
+                    MonsterFogData f2 = store2.MonsterFogLayer[x, y];
+                    if (f1.IsExplored != f2.IsExplored || f1.HasMonster != f2.HasMonster || 
+                        f1.IsDangerZone != f2.IsDangerZone || f1.DangerLevel != f2.DangerLevel || 
+                        f1.MonsterType != f2.MonsterType)
+                    {
+                        t32Ok = false;
+                        failDetail = $"种子 114514L 两次生成的 MonsterFogLayer 在格 ({x}, {y}) 产生差异！f1=(Explored={f1.IsExplored}, Monster={f1.HasMonster}, Type={f1.MonsterType}), f2=(Explored={f2.IsExplored}, Monster={f2.HasMonster}, Type={f2.MonsterType})";
+                        break;
+                    }
+                }
+                if (!t32Ok) break;
+            }
+            GameObject.DestroyImmediate(store2);
+
+            Assert(t32Ok, "T32_MonsterFog_SeedConsistency",
+                "种子哈希一致性校验成功！使用相同种子生成的迷雾探索、怪物分布、红框危险状态完全一致，100% 确定性重现",
+                $"种子生成一致性验证失败！错误细节: {failDetail}");
         }
     }
 }
