@@ -212,6 +212,23 @@ namespace RPG.Map
         public void RenderAllLayers() {}
     }
 
+    public class SaveLoadManager : UnityEngine.MonoBehaviour
+    {
+        public int Gold { get; set; } = 0;
+        public int Wood { get; set; } = 0;
+        public int Stone { get; set; } = 0;
+        public List<string> UnlockedTechs { get; set; } = new List<string>();
+        public int CurrentTickId { get; set; } = 0;
+        public System.Func<int> GetCurrentTickCallback;
+
+        public void SaveGameSlot(int slotIndex) {}
+        public void SaveGameAuto() {}
+        public void SaveGameExit() {}
+        public void LoadGameSlot(int slotIndex) {}
+        public void LoadGameAuto() {}
+        public void LoadGameExit() {}
+    }
+
     public class MapGenerator : UnityEngine.MonoBehaviour
     {
         public bool generateOnStart = true;
