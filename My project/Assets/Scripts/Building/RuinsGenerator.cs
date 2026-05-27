@@ -7,7 +7,7 @@ namespace RPG.Map.Building
     /// <summary>
     /// 世界遗迹与极客奇观生成器
     /// 职责：在遗迹（RUINS）地形上生成 5~8 个世界遗迹；
-    ///       在距离大本营 50 格以外的无建筑/无资源的草原（PLAINS）上生成 2~4 个极客奇观（两两间距 >= 20）。
+    ///       在距离大本营 50 格以外的无建筑/无资源的非水域陆地上生成 2~4 个极客奇观（两两间距 >= 20）。
     /// 实现说明书 §5.1 与验证计划修正。
     /// </summary>
     public static class RuinsGenerator
@@ -36,9 +36,10 @@ namespace RPG.Map.Building
 
         // 预设极客奇观ID
         private static readonly string[] WONDER_IDS = {
-            "WONDER_GIL_LOCK",        // GIL全局锁链
-            "WONDER_SINGLETON_ALTAR", // 单例高地台座
-            "WONDER_INFINITE_LOOP"    // 无限循环回廊
+            "WONDER_GIL_LOCK",              // GIL全局锁链
+            "WONDER_SINGLETON_ALTAR",       // 单例高地台座
+            "WONDER_INFINITE_LOOP",         // 无限循环回廊
+            "WONDER_RACE_CONDITION_SPIRE"   // 竞态条件之塔
         };
 
         /// <summary>
@@ -128,8 +129,8 @@ namespace RPG.Map.Building
                 int ringDistance = Mathf.Max(Mathf.Abs(x - cx), Mathf.Abs(y - cy));
                 if (ringDistance <= WONDER_RING_MIN) continue;
 
-                // 条件 2：奇观必须落在草原（PLAINS）地形上
-                if (terrainLayer[x, y] != TerrainType.PLAINS) continue;
+                // 条件 2：奇观只要落在非水域（WATER）地形上即可（包含草原、冻土、荒野等，征服极端地形）
+                if (terrainLayer[x, y] == TerrainType.WATER) continue;
 
                 // 条件 3：该格上绝不能已有任何世界预置建筑（基地/城邦/遗迹）
                 if (buildingLayer[x, y].HasBuilding) continue;
@@ -169,11 +170,11 @@ namespace RPG.Map.Building
             if (wondersPlaced < targetWonderCount)
             {
                 Debug.LogWarning($"[RuinsGenerator] 仅成功放置 {wondersPlaced}/{targetWonderCount} 个奇观，" +
-                                 $"尝试次数已达 {MAX_ATTEMPTS} 上限。可能是空白草原格不足或间距冲突。");
+                                 $"尝试次数已达 {MAX_ATTEMPTS} 上限。可能是空白陆地格不足或间距冲突。");
             }
             else
             {
-                Debug.Log($"[RuinsGenerator] 成功在偏远草原圈层生成 {wondersPlaced} 个极客奇观。");
+                Debug.Log($"[RuinsGenerator] 成功在偏远陆地圈层生成 {wondersPlaced} 个极客奇观。");
             }
         }
     }

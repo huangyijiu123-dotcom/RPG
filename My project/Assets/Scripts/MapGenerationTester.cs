@@ -76,6 +76,15 @@ namespace RPG.Map.Test
 
                 // 用例 8：测试极端边界 long.MinValue 种子有效性与安全性
                 Test_LongMinValue_Overflow(store);
+
+                // 用例 9：测试第三层初始大本营与城邦世界级建筑放置
+                Test_Layer3_CampStateBuildings(store);
+
+                // 用例 10：测试第三层世界遗迹生成数量及地貌限定 (区间 [0, 8] 兼容，种子下必为 [5, 8])
+                Test_Layer3_RuinsCount(store);
+
+                // 用例 11：测试第三层世界极客奇观生成数量、偏远圈层限制、去资源纯空草原以及两两间距限制 (区间 [2, 4])
+                Test_Layer3_WondersCountAndConstraints(store);
             }
             catch (System.Exception ex)
             {
@@ -517,6 +526,192 @@ namespace RPG.Map.Test
             Assert(isBaseCampSafe, "Test_LongMinValue_Overflow",
                 "保护验证成功！即使噪声场在负溢出偏置下被玩坏，安全罩 BaseCampProtector 仍完美捍卫大本营坐标 (100,100)",
                 $"保护防线失守！在极端种子下大地图中心变成了: {store.TerrainLayer[MapDataStore.CENTER, MapDataStore.CENTER]}");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        // 🧪 测试用例 9：第三层初始大本营与城邦建筑验证
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        private void Test_Layer3_CampStateBuildings(MapDataStore store)
+        {
+            long testSeed = 114514L;
+            TerrainLayerGen.Generate(testSeed, store);
+            ResourceLayerGen.Generate(testSeed, store);
+            BuildingLayerGen.Generate(testSeed, store);
+
+            // 1. 验证大本营建筑
+            BuildingData centerB = store.BuildingLayer[MapDataStore.CENTER, MapDataStore.CENTER];
+            bool isBaseCampBuildingOk = centerB.HasBuilding && 
+                                         centerB.BuildingType == "BASE_CAMP" && 
+                                         centerB.IsWorldGenerated;
+
+            Assert(isBaseCampBuildingOk, "Test_Layer3_CampStateBuildings",
+                "大地图中心坐标 (100, 100) 成功被放置了基地建筑 BASE_CAMP，标记为世界生成",
+                $"基地建筑缺失或属性异常！实际数据: HasBuilding={centerB.HasBuilding}, Type={centerB.BuildingType}");
+
+            // 2. 验证城邦建筑
+            bool isAllCityStateBuildingsOk = true;
+            string cityStateFailDetail = "";
+            int cityStatesFound = 0;
+
+            for (int x = 0; x < MapDataStore.MAP_SIZE; x++)
+            {
+                for (int y = 0; y < MapDataStore.MAP_SIZE; y++)
+                {
+                    if (store.TerrainLayer[x, y] == TerrainType.CITY_STATE)
+                    {
+                        cityStatesFound++;
+                        BuildingData b = store.BuildingLayer[x, y];
+                        if (!b.HasBuilding || b.BuildingType != "CITY_STATE" || !b.IsWorldGenerated)
+                        {
+                            isAllCityStateBuildingsOk = false;
+                            cityStateFailDetail = $"城邦地形格 ({x}, {y}) 处的建筑不符合规格！实际: HasBuilding={b.HasBuilding}, Type={b.BuildingType}";
+                            break;
+                        }
+                    }
+                }
+                if (!isAllCityStateBuildingsOk) break;
+            }
+
+            Assert(isAllCityStateBuildingsOk && cityStatesFound == 3, "Test_Layer3_CampStateBuildings",
+                $"成功对齐了 3 个初始城邦建筑，其放置坐标、类型 (CITY_STATE) 及世界级标识均校验成功",
+                $"城邦建筑配置错误！错误细节: {cityStateFailDetail} (共找到 {cityStatesFound} 个城邦地形格)");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        // 🧪 测试用例 10：第三层世界遗迹数量与地形归属验证 (容错在 [0, 8] 内)
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        private void Test_Layer3_RuinsCount(MapDataStore store)
+        {
+            long testSeed = 114514L;
+            TerrainLayerGen.Generate(testSeed, store);
+            ResourceLayerGen.Generate(testSeed, store);
+            BuildingLayerGen.Generate(testSeed, store);
+
+            int ruinsCount = 0;
+            bool onlyOnRuinsTerrain = true;
+            string failDetail = "";
+
+            for (int x = 0; x < MapDataStore.MAP_SIZE; x++)
+            {
+                for (int y = 0; y < MapDataStore.MAP_SIZE; y++)
+                {
+                    BuildingData b = store.BuildingLayer[x, y];
+                    if (b.HasBuilding && b.BuildingType.StartsWith("RUINS_"))
+                    {
+                        ruinsCount++;
+                        // 遗迹只能长在 RUINS 地形上
+                        if (store.TerrainLayer[x, y] != TerrainType.RUINS)
+                        {
+                            onlyOnRuinsTerrain = false;
+                            failDetail = $"坐标 ({x}, {y}) 有遗迹建筑 {b.BuildingType}，但地形是: {store.TerrainLayer[x, y]}，非 RUINS 地貌";
+                            break;
+                        }
+                    }
+                }
+                if (!onlyOnRuinsTerrain) break;
+            }
+
+            // 1. 验证数量区间 [0, 8]（在当前测试种子下，RUINS 地形充足，必然在 [5, 8] 范围内）
+            bool isCountWithinRange = ruinsCount >= 5 && ruinsCount <= 8;
+            Assert(isCountWithinRange, "Test_Layer3_RuinsCount",
+                $"世界生成的遗迹数量校验成功！当前共生成 {ruinsCount} 个遗迹，严格落在设计要求的 [5, 8] 内",
+                $"遗迹生成数量异常！实际生成数量: {ruinsCount}");
+
+            // 2. 验证地貌限定
+            Assert(onlyOnRuinsTerrain, "Test_Layer3_RuinsCount",
+                "所有废弃文明遗迹建筑均 100% 坐落于 RUINS (遗迹) 地貌格上",
+                $"遗迹地貌限定验证失败！错误细节: {failDetail}");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        // 🧪 测试用例 11：第三层世界极客奇观数量、偏远圈层、开荒无资源及间距限制验证 (严格 [2, 4] 奇观)
+        // ─────────────────────────────────────────────────────────────────────────────────────────────
+        private void Test_Layer3_WondersCountAndConstraints(MapDataStore store)
+        {
+            long testSeed = 114514L;
+            TerrainLayerGen.Generate(testSeed, store);
+            ResourceLayerGen.Generate(testSeed, store);
+            BuildingLayerGen.Generate(testSeed, store);
+
+            List<Vector2Int> wonderPositions = new List<Vector2Int>();
+            bool onlyOnLand = true;
+            bool onlyOuterRing = true;
+            bool onlyNoResources = true;
+            string failDetail = "";
+
+            int cx = MapDataStore.CENTER;
+            int cy = MapDataStore.CENTER;
+
+            for (int x = 0; x < MapDataStore.MAP_SIZE; x++)
+            {
+                for (int y = 0; y < MapDataStore.MAP_SIZE; y++)
+                {
+                    BuildingData b = store.BuildingLayer[x, y];
+                    if (b.HasBuilding && b.BuildingType.StartsWith("WONDER_"))
+                    {
+                        wonderPositions.Add(new Vector2Int(x, y));
+
+                        // 1. 奇观绝不能长在水里（必须是陆地地貌）
+                        if (store.TerrainLayer[x, y] == TerrainType.WATER)
+                        {
+                            onlyOnLand = false;
+                            failDetail = $"奇观 {b.BuildingType} 长在了水域格 ({x}, {y})";
+                            break;
+                        }
+
+                        // 2. 奇观只在 50 外圈层
+                        int ringDist = Mathf.Max(Mathf.Abs(x - cx), Mathf.Abs(y - cy));
+                        if (ringDist <= 50)
+                        {
+                            onlyOuterRing = false;
+                            failDetail = $"奇观 {b.BuildingType} 坐标 ({x}, {y}) 距离中心圈层仅为 {ringDist} (<= 50)";
+                            break;
+                        }
+
+                        // 3. 奇观不能长在有资源的格子上
+                        ResourceData res = store.ResourceLayer[x, y];
+                        if (res.HasForest || res.HasMineralVein || res.HasHerbs)
+                        {
+                            onlyNoResources = false;
+                            failDetail = $"奇观 {b.BuildingType} 坐标 ({x}, {y}) 覆盖了资源！(Forest={res.HasForest}, Mine={res.HasMineralVein})";
+                            break;
+                        }
+                    }
+                }
+                if (!onlyOnLand || !onlyOuterRing || !onlyNoResources) break;
+            }
+
+            // 1. 验证数量
+            bool isCountCorrect = wonderPositions.Count >= 2 && wonderPositions.Count <= 4;
+            Assert(isCountCorrect, "Test_Layer3_WondersCountAndConstraints",
+                $"世界极客奇观数量校验成功！当前共生成 {wonderPositions.Count} 个奇观，严格落在 [2, 4] 区间",
+                $"奇观生成数量异常！实际生成数量: {wonderPositions.Count}");
+
+            // 2. 验证三大地表及圈层限定
+            Assert(onlyOnLand && onlyOuterRing && onlyNoResources, "Test_Layer3_WondersCountAndConstraints",
+                "所有极客奇观 100% 长在距大本营 50 格外的非水域空白陆地上，成功规避了林/矿/草药格子",
+                $"奇观落户环境验证失败！错误细节: {failDetail}");
+
+            // 3. 验证两两间距 >= 20
+            bool isSpacingOk = true;
+            for (int i = 0; i < wonderPositions.Count; i++)
+            {
+                for (int j = i + 1; j < wonderPositions.Count; j++)
+                {
+                    int dist = Mathf.Max(Mathf.Abs(wonderPositions[i].x - wonderPositions[j].x), Mathf.Abs(wonderPositions[i].y - wonderPositions[j].y));
+                    if (dist < 20)
+                    {
+                        isSpacingOk = false;
+                        failDetail = $"奇观 {i}({wonderPositions[i]}) 与奇观 {j}({wonderPositions[j]}) 间距仅为 {dist} 格，低于最小限制 20 格";
+                        break;
+                    }
+                }
+                if (!isSpacingOk) break;
+            }
+
+            Assert(isSpacingOk, "Test_Layer3_WondersCountAndConstraints",
+                "奇观间距校验成功！所有世界级极客奇观的两两切比雪夫间距均严格 >= 20 格，空间探索感极佳",
+                $"奇观间距过近！错误细节: {failDetail}");
         }
     }
 }
