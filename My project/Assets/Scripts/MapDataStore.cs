@@ -133,12 +133,12 @@ namespace RPG.Map
         [Header("地图基本参数")]
         public long CurrentSeed = 114514L;
 
-        // 四层及属性矩阵数据（由具体生成器填充）
-        public TerrainType[,] TerrainLayer { get; private set; }
-        public ClimateData[,] RawClimateLayer { get; private set; }
-        public ResourceData[,] ResourceLayer { get; private set; }
-        public BuildingData[,] BuildingLayer { get; private set; }
-        public MonsterFogData[,] MonsterFogLayer { get; private set; }
+        // 四层及属性矩阵数据（由具体生成器填充，保留 public set 以便生成器直接写入）
+        public TerrainType[,] TerrainLayer { get; set; }
+        public ClimateData[,] RawClimateLayer { get; set; }
+        public ResourceData[,] ResourceLayer { get; set; }
+        public BuildingData[,] BuildingLayer { get; set; }
+        public MonsterFogData[,] MonsterFogLayer { get; set; }
 
         // 气候控制器
         public IClimateController ClimateController { get; set; }
