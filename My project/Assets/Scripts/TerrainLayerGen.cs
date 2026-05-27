@@ -39,15 +39,15 @@ public static class TerrainLayerGen
 
         // ── 步骤 2：逐格判定地形类型 ─────────────────────────────────────────
         Debug.Log("[TerrainLayerGen] 步骤2：逐格评估地形类型（决策树）...");
-        // 使用种子驱动的随机数生成器，确保遗迹概率分布稳定可复现
-        var rng = new System.Random((int)(seed ^ (seed >> 32)));
+        // 注意：每个格子使用独立的哈希随机数，与循环顺序完全无关。
+        // 保证同种子地图可完美复现（存档读档后一致）。
 
         for (int x = 0; x < size; x++)
         {
             for (int y = 0; y < size; y++)
             {
-                float dangerBias   = TerrainEvaluator.CalculateDangerBias(x, y);
-                float randomValue  = (float)rng.NextDouble();
+                float dangerBias  = TerrainEvaluator.CalculateDangerBias(x, y);
+                float randomValue = GetCellRandom(seed, x, y); // 确定性逐格哈希
                 ClimateData climate = climateData[x, y];
 
                 store.TerrainLayer[x, y] = TerrainEvaluator.EvaluateCell(x, y, climate, dangerBias, randomValue);
@@ -63,5 +63,18 @@ public static class TerrainLayerGen
         CityStateGenerator.PlaceCityStates(seed, store.TerrainLayer);
 
         Debug.Log("[TerrainLayerGen] 第一层（地形与气候）生成完成！");
+    }
+
+    /// <summary>
+    /// 逐格确定性哈希随机数生成器。
+    /// 返回 [0, 1) 范围内的浮点数，完全由 (seed, x, y) 决定，与循环顺序无关。
+    /// 天然支持存档读档后的途径复现。
+    /// </summary>
+    private static float GetCellRandom(long seed, int x, int y)
+    {
+        // 使用经典整数哈希常数，将 (seed, x, y) 混入生成高分布的伪随机种子
+        long h = seed ^ ((long)x * 374761393L + (long)y * 668265263L);
+        var cellRng = new System.Random((int)(h ^ (h >> 32)));
+        return (float)cellRng.NextDouble();
     }
 }

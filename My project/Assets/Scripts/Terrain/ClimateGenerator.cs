@@ -5,8 +5,13 @@ namespace RPG.Map.Terrain
 {
     /// <summary>
     /// 气候与噪声生成模块
-    /// 职责：使用七套独立柏林噪声，计算整张地图的高度、湿度、温度及河流方向字段，
+    /// 职责：使用四套独立柏林噪声，计算整张地图的高度、湿度、温度及河流方向字段，
     /// 返回 MAP_SIZE × MAP_SIZE 的静态气候属性矩阵。
+    ///
+    /// ⚠️ 约定：ClimateData.Altitude 存储的是【河流融合后】的高度值
+    ///     （= rawAltitude × 0.7 + riverNoise × 0.3），而非原始柏林噪声值。
+    ///     TerrainEvaluator.EvaluateCell 会在此基础上临时叠加 dangerBias，
+    ///     计算 finalAltitude 用于地形判定，但不会写回 ClimateData，保持数据干净。
     /// </summary>
     public static class ClimateGenerator
     {
@@ -53,7 +58,9 @@ namespace RPG.Map.Terrain
                             y * RIVER_SCALE + riverOffset));
 
                     // 融合高度 = 原始高度 * 0.7 + 河流噪声 * 0.3
-                    float finalAltitude = Mathf.Clamp01(rawAltitude * ALTITUDE_WEIGHT + riverNoise * RIVER_WEIGHT);
+                    // 此值作为 ClimateData.Altitude 存储，是后续地形判定的起点，
+                    // dangerBias 由 TerrainEvaluator 在判定时临时叠加，不在此处写入。
+                    float fusedAltitude = Mathf.Clamp01(rawAltitude * ALTITUDE_WEIGHT + riverNoise * RIVER_WEIGHT);
 
                     // 湿度
                     float humidity = Mathf.Clamp01(
@@ -67,7 +74,7 @@ namespace RPG.Map.Terrain
                             x * TEMPERATURE_SCALE + temperatureOffset,
                             y * TEMPERATURE_SCALE + temperatureOffset));
 
-                    result[x, y] = new ClimateData(finalAltitude, humidity, temperature);
+                    result[x, y] = new ClimateData(fusedAltitude, humidity, temperature);
                 }
             }
 
