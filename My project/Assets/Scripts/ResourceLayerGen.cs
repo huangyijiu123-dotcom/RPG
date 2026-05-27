@@ -34,11 +34,11 @@ namespace RPG.Map
                 return;
             }
 
-            // 兜底：如果资源层数组未被初始化，则在此初始化
+            // 兜底：如果资源层数组未被初始化，则在此单独初始化，不能使用 InitArrays 以防重置地形层
             if (store.ResourceLayer == null)
             {
-                Debug.LogWarning("[ResourceLayerGen] ResourceLayer 数组为 null，执行 InitArrays 重新初始化。");
-                store.InitArrays();
+                Debug.LogWarning("[ResourceLayerGen] ResourceLayer 数组为 null，单独执行实例化初始化。");
+                store.ResourceLayer = new ResourceData[MapDataStore.MAP_SIZE, MapDataStore.MAP_SIZE];
             }
 
             Debug.Log("[ResourceLayerGen] 开始生成第二层（资源分布层）...");

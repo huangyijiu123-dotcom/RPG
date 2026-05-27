@@ -38,9 +38,9 @@ namespace RPG.Map.Resource
 
                     // 2. 使用简单的确定性哈希散列算法，有 40% 的概率在沼泽地上生成草药：
                     //    (x * 31 + y * 17 + seed) % 10 < 4
-                    //    注意使用 long 类型防止计算溢出
-                    long hashVal = System.Math.Abs(x * 31L + y * 17L + seed);
-                    if (hashVal % 10 < 4)
+                    //    注意使用 long 类型防止计算溢出，并利用归正取模算法解决负数和 long.MinValue 溢出问题
+                    long hashVal = x * 31L + y * 17L + seed;
+                    if (((hashVal % 10L) + 10L) % 10L < 4)
                     {
                         resourceLayer[x, y].HasHerbs = true;
                     }
