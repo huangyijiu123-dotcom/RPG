@@ -1,0 +1,448 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【PythonRPG】Unity 四层地图生成系统 · 完整技术设计说明书 (最终确认版 v2.1)
+版本：v2.1    编写日期：2026-05-27
+修改摘要：根据 AI 头脑风暴反馈，修正大本营坐标、噪声套数、安全区边界、遗迹容错等 6 处逻辑冲突。
+用途：供 AI 直接读取并生成 C# / Kotlin 代码的完整参考与实现规范
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+═══════════════════════════════════════════════════════════════════
+一、系统总览
+═══════════════════════════════════════════════════════════════════
+
+【项目基本信息】
+  引擎：Unity（C#）+ Kotlin（后端 WebSocket 服务器）
+  地图类型：2D 俯视角网格地图（Grid-based, Top-down）
+  地图尺寸：200 × 200 格（大本营位置强制固定在数组正中心坐标 (100, 100)，即 MapDataStore.CENTER）
+  随机种子：Long 整数，默认固定值 114514L，支持新建游戏时随机生成
+  Tilemap 系统：使用 Unity 原生 Grid + Tilemap 组件，四层叠加
+
+【四层架构总览】
+  第一层（Layer 0）：地形层 TerrainLayer     ← 最底层，纯地形，永远不变
+  第二层（Layer 1）：资源层 ResourceLayer    ← 叠在地形上，可采集/消耗/刷新
+  第三层（Layer 2）：建筑层 BuildingLayer    ← 玩家建造 + 世界预置遗迹/奇观
+  第四层（Layer 3）：怪物与迷雾层 MonsterFogLayer ← 监管迷雾（探索状态）与怪物（刷新/占领/阻挡）
+
+【Unity 场景节点结构（已敲定）】
+  WorldGrid (Grid 组件)
+    ├── TerrainTilemap     (Tilemap, TilemapRenderer Order=0)
+    ├── ResourceTilemap    (Tilemap, TilemapRenderer Order=1)
+    ├── BuildingTilemap    (Tilemap, TilemapRenderer Order=2)
+    └── MonsterFogTilemap  (Tilemap, TilemapRenderer Order=3, 叠加黑雾或危险红色/暗色蒙版)
+
+【核心脚本文件清单】
+  [前端新建] MapGenerator.cs         ← 统筹调用，入口脚本
+  [前端新建] TerrainLayerGen.cs      ← 第一层：地形与静态气候生成
+  [前端新建] ResourceLayerGen.cs     ← 第二层：资源分布生成
+  [前端新建] BuildingLayerGen.cs     ← 第三层：预置建筑/遗迹放置
+  [前端新建] MonsterFogLayerGen.cs   ← 第四层：迷雾系统、怪物分布、怪物浪潮与建筑阻挡监管
+  [前端新建] MapDataStore.cs         ← 全局唯一数据仓库，存储四层数组及状态
+  [前端修改] MapRenderer.cs          ← 读取 MapDataStore 并渲染四层 Tilemap
+  [前端新建] SaveLoadManager.cs      ← 全局存档管理器（负责自动/手动/退出存档的序列化与通讯）
+  [后端修改] BuildingEngine.kt       ← 接收前端携带的地形/资源校验，并支持建筑“阻挡禁用”状态
+  [后端新建] SaveLoadSystem.kt       ← 后端存档处理器，配合前端实现完整的游戏数据序列化
+
+═══════════════════════════════════════════════════════════════════
+二、全局数据结构与接口定义
+═══════════════════════════════════════════════════════════════════
+
+【2.1 地形类型枚举 TerrainType】
+  PLAINS      = 0   草原（主要可建造地形）
+  MOUNTAIN    = 1   山地（采石/采矿）
+  WATER       = 2   水域（不可通行，成片连续分布）
+  SWAMP       = 3   沼泽（低温度+高湿度区域）
+  TUNDRA      = 4   冻土（低温度+低湿度极远圈层）
+  VOLCANO     = 5   火山地表（极高温度，极危险圈层）
+  RUINS       = 6   遗迹（废弃文明残骸，特殊圈层）
+  CITY_STATE  = 7   城邦（极远圈层，可交互的中立势力）
+  BASE_CAMP   = 8   大本营（玩家出生点，唯一固定在地图中心）
+
+  【临时图片映射（无美术素材时的占位）】
+    SWAMP      → 临时用 WATER 图片
+    RUINS      → 临时用 MOUNTAIN 图片
+    VOLCANO    → 临时用 MOUNTAIN 图片
+    TUNDRA     → 临时用 MOUNTAIN 图片
+    CITY_STATE → 临时用 PLAINS 图片
+
+【2.2 资源数据结构 ResourceData（每格）】
+  struct ResourceData {
+    bool    hasForest;          // 是否有森林
+    int     forestDensity;      // 森林密度 0~100（0=无，100=茂密）
+    bool    hasMineralVein;     // 是否有矿脉
+    string  mineralType;        // 矿脉类型 "IRON" / "STONE" / "CRYSTAL"（空=无）
+    bool    hasHerbs;           // 是否有草药（沼泽地形专属资源）
+  }
+
+【2.3 建筑数据结构 BuildingData（每格）】
+  struct BuildingData {
+    bool    hasBuilding;        // 是否有建筑
+    string  buildingType;       // 建筑类型 ID（如 "LUMBER_CAMP"，空=无）
+    bool    isWorldGenerated;   // true=世界生成的遗迹/中立，false=玩家建造的
+    int     buildingLevel;      // 建筑等级，默认 1
+    bool    isBuildingBlocked;  // 该建筑是否因为怪物占领而失效/无法使用（对应冲突2）
+  }
+
+【2.4 怪物与迷雾数据结构 MonsterFogData（每格，第四层 Order=3 监管）】
+  struct MonsterFogData {
+    bool    isDangerZone;       // 是否是危险格（基础生成标记，视觉上红色/暗色外框）
+    int     dangerLevel;        // 危险等级 1~5
+    string  monsterType;        // 怪物类型 ID（如 "SLIME"，空=随机）
+    bool    hasMonster;         // 该格子当前是否正有存活的怪物（开图时且isDangerZone=true时默认为true）
+    bool    isExplored;         // 迷雾/探索状态（true=已探索无雾，false=未探索被黑雾笼罩）
+  }
+
+【2.5 气候数据接口与数据结构（对应冲突三）】
+  struct ClimateData {
+    float   altitude;           // 高度值 0.0~1.0
+    float   humidity;           // 湿度值 0.0~1.0
+    float   temperature;        // 温度值 0.0~1.0（0=极寒, 1=极热）
+  }
+
+  // 气候数据控制器接口（为未来增加动态季节系统留出接口）
+  public interface IClimateController {
+    ClimateData GetClimateData(int x, int y);
+    void UpdateClimate(float gameTime); // 动态季节系统在此处更新温度、湿度等
+  }
+
+  // 静态气候控制器（当前阶段实现，返回地图生成时的静态气候偏向）
+  public class StaticClimateController : IClimateController {
+    private ClimateData[,] staticClimate;
+
+    public StaticClimateController(ClimateData[,] data) {
+      this.staticClimate = data;
+    }
+
+    public ClimateData GetClimateData(int x, int y) {
+      return staticClimate[x, y];
+    }
+
+    public void UpdateClimate(float gameTime) {
+      // 静态气候在运行时不发生变化，但预留此空接口以便季节系统直接重写
+    }
+  }
+
+【2.6 MapDataStore（全局单例，存储及同步完整四层数据）】
+  public class MapDataStore : MonoBehaviour {
+    public static MapDataStore Instance;
+    public const int MAP_SIZE = 200;
+    public const int CENTER = 100; // 地图中心坐标点常量（对应问题1）
+    public long currentSeed = 114514L;
+
+    public TerrainType[,]       terrainLayer;      // [x, y]
+    public ClimateData[,]       rawClimateLayer;   // [x, y]
+    public ResourceData[,]      resourceLayer;     // [x, y]
+    public BuildingData[,]      buildingLayer;     // [x, y]
+    public MonsterFogData[,]    monsterFogLayer;   // [x, y]
+
+    public IClimateController   climateController; // 当前激活的气候控制器（初始为静态，未来可替换为动态）
+
+    public void InitArrays() {
+      terrainLayer = new TerrainType[MAP_SIZE, MAP_SIZE];
+      rawClimateLayer = new ClimateData[MAP_SIZE, MAP_SIZE];
+      resourceLayer = new ResourceData[MAP_SIZE, MAP_SIZE];
+      buildingLayer = new BuildingData[MAP_SIZE, MAP_SIZE];
+      monsterFogLayer = new MonsterFogData[MAP_SIZE, MAP_SIZE];
+    }
+  }
+
+═══════════════════════════════════════════════════════════════════
+三、第一层：地形与静态气候生成算法（TerrainLayerGen.cs）
+═══════════════════════════════════════════════════════════════════
+
+【3.1 三套柏林噪声参数】
+  使用独立的种子偏移保证高度、湿度、温度三套物理场互相独立：
+
+  噪声一（高度 altitude）：
+    noiseScale  = 0.04f
+    seedOffset  = (float)(seed % 10000)
+
+  噪声二（湿度 humidity）：
+    noiseScale  = 0.035f
+    seedOffset  = (float)((seed * 3) % 10000)
+
+  噪声三（温度 temperature）：
+    noiseScale  = 0.025f
+    seedOffset  = (float)((seed * 7) % 10000)
+
+【3.2 水域连续性（河流走向噪声，对应问题2）】
+  在高度噪声基础上，叠加一套"河流走向噪声"以拉伸水域并创造长条形河流：
+  噪声四（河流走向 altitude_river）：
+    riverNoiseScale = 0.015f     // 极低频，让水域形成长条河流走廊
+    riverOffset     = (float)((seed * 13) % 10000)
+
+  最终高度值 = altitude * 0.7f + riverNoise * 0.3f
+  这能确保水域自然连通，形成优美的河流与湖泊，避免孤立散点。
+
+【3.3 圈层距离计算与地形渐变】
+  圈层距离 = 当前格子到大本营（数组中心点 MapDataStore.CENTER, MapDataStore.CENTER）的切比雪夫距离。
+  float ringDistance = Mathf.Max(Mathf.Abs(x - MapDataStore.CENTER), Mathf.Abs(y - MapDataStore.CENTER));
+
+  圈层系数（dangerBias）使边缘地带的地形更偏向极端环境：
+    安全区     0~10格  : dangerBias = 0.0f
+    过渡区    10~25格  : dangerBias = 0.1f
+    危险区    25~50格  : dangerBias = 0.2f
+    极危险区  50格以上 : dangerBias = 0.35f
+
+  最终高度值 = Mathf.Clamp01(rawAltitude + dangerBias)
+
+【3.4 地形决策树】
+  根据 finalAltitude、humidity、temperature 进行地形判定：
+
+  步骤1：极危险圈层（ringDistance > 50 且有概率触发）强制覆盖
+    if (ringDistance > 70 && temperature > 0.75f) → VOLCANO（火山）
+    else if (ringDistance > 70 && temperature < 0.25f) → TUNDRA（冻土）
+
+  步骤2：水域判断（高优先级，成片连通）
+    if (finalAltitude < 0.18f) → WATER（水域）
+
+  步骤3：山地判断
+    if (finalAltitude > 0.60f)
+      if (ringDistance > 40 && random < 0.08f) → RUINS（自然生成遗迹点）
+      else → MOUNTAIN（山地）
+
+  步骤4：草原与特殊地形（中等高度值）
+    if (finalAltitude >= 0.18f && finalAltitude <= 0.60f)
+      if (humidity > 0.65f && temperature < 0.45f) → SWAMP（沼泽）
+      else → PLAINS（草原，核心建造区）
+
+  步骤5：大本营保护区
+    以中心坐标（MapDataStore.CENTER, MapDataStore.CENTER）为中心，半径 5 格内的所有格子强制改为 PLAINS，地形置为 BASE_CAMP。
+
+【3.5 城邦（CITY_STATE）放置】
+  地图上固定生成 3 个城邦。
+  使用泊松圆盘分布（Poisson Disk Sampling），确保：
+    - 城邦落在中心 60 格之外（基于 MapDataStore.CENTER 计算）。
+    - 城邦两两之间距离 >= 40 格。
+    - 城邦只可落在原本为 PLAINS 的地形上。
+    - 生成后，该格地形类型标记为 CITY_STATE。
+
+═══════════════════════════════════════════════════════════════════
+四、第二层：资源分布生成算法（ResourceLayerGen.cs）
+═══════════════════════════════════════════════════════════════════
+
+【4.1 森林分布（对应问题2与问题6）】
+  噪声五（森林分布 forest）：
+    forestNoiseScale = 0.06f
+    forestSeedOffset = (float)((seed * 17) % 10000)
+
+  生成逻辑：
+    1. 目标格地形 != PLAINS → 跳过，不生成森林（森林仅生在草原上）。
+    2. noiseValue > 0.55f → hasForest = true。
+    3. forestDensity = (int)((noiseValue - 0.55f) / 0.45f * 100f)（归一化映射到 0~100）。
+    4. 圈层修正：在大本营周围（ringDistance < 12），`forestDensity = (int)(forestDensity * 0.6f)` 以免密林堵路（强转防编译错误）。
+
+【4.2 矿石分布（对应问题2）】
+  噪声六（矿石分布 mine）：
+    mineNoiseScale  = 0.08f
+    mineSeedOffset  = (float)((seed * 23) % 10000)
+
+  生成逻辑：
+    1. 目标格地形 != MOUNTAIN → 跳过（矿石只在山地上刷新）。
+    2. noiseValue > (0.60f - (ringDistance / 200f * 0.25f)) → hasMineralVein = true（越远矿越密）。
+    3. 矿种由圈层距离决定：
+       - ringDistance 0~20   : mineralType = "STONE"     (基础石材)
+       - ringDistance 20~45  : mineralType = "IRON"      (铁矿石)
+       - ringDistance 45以上 : mineralType = "CRYSTAL"   (算力晶体，高科技材料)
+
+【4.3 草药分布】
+  1. 目标格地形 != SWAMP → 跳过（草药是沼泽专属资源）。
+  2. 使用简单的哈希散列算法，有 40% 的概率在沼泽地上生成草药：
+     hasHerbs = ((x * 31 + y * 17 + seed) % 10 < 4)。
+
+【4.4 资源与建筑的交互行为】
+  - LUMBER_CAMP（伐木场）：必须建在 hasForest == true 的格子上。
+    游戏运行时每 Tick，伐木场会消耗森林：`forestDensity -= 5`。
+    当 forestDensity <= 0 时，hasForest 变为 false，格子成为普通 PLAINS。
+  - MINE（矿场）：必须建在 hasMineralVein == true 的格子上，开采完毕后矿脉消失。
+  - 普通民居、仓库等建筑：必须建在没有任何资源（hasForest、hasMineralVein 均为 false）的空白土地上。玩家必须先伐木开荒，清除资源后才可规划建设。
+
+═══════════════════════════════════════════════════════════════════
+五、第三层：建筑层生成算法（BuildingLayerGen.cs）
+═══════════════════════════════════════════════════════════════════
+
+【5.1 预置建筑与遗迹奇观（isWorldGenerated = true，对应问题4容错）】
+  - 大本营建筑（BASE_CAMP）：无条件且唯一地放置在大地图中心点（MapDataStore.CENTER, MapDataStore.CENTER）。
+  - 城邦建筑（CITY_STATE）：放置在第一层城邦节点的 3 个坐标上。
+  - 遗迹建筑（Ghost Repo Ruins、Null Pointer Cemetery 等）：
+    在地形为 RUINS 的格子里，使用固定种子随机选取。
+    【遗迹数量容错机制】：预置遗迹目标放置 5~8 个，若地图噪声算法自然生成的 RUINS 瓦片格数不足，则直接使用 `Mathf.Min(ruinsTiles.Count, Random.Range(5, 9))` 来限制实际放置的数量，严禁强行对空坐标生成以防产生空指针异常。
+  - 极客奇观（GIL锁链、单例高地台座等）：
+    在 ringDistance > 50 范围内随机放置 2~4 个，保证两两距离 >= 20，并作为世界级探索目标。
+
+【5.2 玩家建造的建筑（isWorldGenerated = false）】
+  - 游戏运行期间，由前端向后端 BuildingEngine.kt 发送 BUILD 网络请求。
+  - 消息格式规范：
+    {
+      "action": "BUILD",
+      "buildingType": "LUMBER_CAMP",
+      "x": 15,
+      "y": 20,
+      "terrainTypeId": "PLAINS",
+      "hasForest": true,
+      "hasMineralVein": false
+    }
+  - 后端直接利用请求中携带的 Terrain/Resource 状态进行校验，杜绝数据同步导致的拒绝建造错误。
+
+═══════════════════════════════════════════════════════════════════
+六、第四层：怪物与迷雾系统算法（MonsterFogLayerGen.cs）
+═══════════════════════════════════════════════════════════════════
+
+【6.1 迷雾/探索系统实现（第四层 Order=3 监管，对应问题3与问题5）】
+  - 开图阶段：
+    - 大本营周围安全圈 `ringDistance <= 10` 的安全区默认为已解锁：`isExplored = true`（无黑迷雾，此处与怪物层边界严格一致为 <= 10，解决冲突3）。
+    - 整个地图的所有其余格子（`ringDistance > 10`），初始全部被迷雾笼罩：`isExplored = false`（显示全黑覆盖）。
+  - 运行时解锁：
+    - 玩家的探险队/冒险者在大地图上移动时，会以自身位置为中心，半径为 3 格的圆形区域内，动态将 `isExplored` 置为 true。
+    - 被探索过的区域将永久去除迷雾（`isExplored = true`）。
+
+【6.2 怪物刷新生成（开图预制，对应问题2与问题3）】
+  噪声七（怪物分布 monster）：
+    monsterNoiseScale  = 0.10f
+    monsterSeedOffset  = (float)((seed * 37) % 10000)
+
+  初始生成判定（地形为 WATER 的格子直接跳过）：
+    - ringDistance <= 10：hasMonster = false（安全区无怪，严格保持一致边界）
+    - ringDistance > 10 的格子，依据噪声判定：
+      - ringDistance 10~25：noiseValue > 0.75f → isDangerZone = true, hasMonster = true, dangerLevel = 1
+      - ringDistance 25~50：noiseValue > 0.60f → isDangerZone = true, hasMonster = true, dangerLevel = 2~3
+      - ringDistance 50以上：noiseValue > 0.45f → isDangerZone = true, hasMonster = true, dangerLevel = 3~5
+
+  怪物类型（monsterType）对应：
+    - dangerLevel 1：SLIME (黏液怪)
+    - dangerLevel 2：BUG_KNIGHT (Bug骑士)
+    - dangerLevel 3：NULL_GHOST (空指针幽灵)
+    - dangerLevel 4：DEADLOCK_GOLEM (死锁魔像)
+    - dangerLevel 5：MEMORY_LEAK_TITAN (内存泄漏巨兽，BOSS级)
+
+【6.3 玩家探索与清怪流程】
+  - 玩家走到该怪物格子上时，必须将怪物清理掉。
+  - 清理怪物的流程：
+    1. 玩家派遣冒险者移动至格子。
+    2. 触发与怪物的战斗事件（通过 WebSocket 送给后台 CombatEngine 处理）。
+    3. 战斗胜利后，前端与后端数据同步，将该格的 `hasMonster` 置为 false，且 `isBuildingBlocked` 置为 false。
+  - **重要限制：只有当 hasMonster == false 时，玩家才被允许在该格建造任何建筑**。
+
+【6.4 怪物浪潮侵袭与建筑阻挡禁用逻辑】
+  - 游戏运行中，BOSS（内存泄漏巨兽）会周期性地发起**怪物浪潮事件（Monster Wave）**。
+  - 浪潮起点：从地图边缘的高危险区（dangerLevel >= 4 或遗迹 RUINS 点）向大本营中心（MapDataStore.CENTER, MapDataStore.CENTER）方向，一步一步扩散、收缩包围圈。
+  - 扩散逻辑：
+    - 每一波侵袭，浪潮会将沿途经过的格子占据，将该格的 `hasMonster` 重新置为 true。
+    - **建筑阻挡判定**：
+      - 如果被浪潮侵入并占领的格子（`hasMonster = true`）上已经建有玩家的建筑（`buildingLayer[x,y].hasBuilding == true`）：
+        - 将该格的建筑阻挡状态置为失效：`buildingLayer[x,y].isBuildingBlocked = true`。
+        - **建筑被禁用**：一旦建筑被阻挡，该建筑的后台所有 Tick 增益和逻辑将**立即被冻结 / 降为 0**（例如：被占领的伐木场无法产出木材，被占领的农田不产粮食，被占领的民居不交税，被占领的工房无法制造工具）。
+  - **玩家的夺回与反击**：
+    - 玩家在主界面会收到“建筑被怪物侵占，已停止运作”的警报。
+    - 玩家需要规划路线，派遣冒险者前往对应的格子清剿怪物。
+    - 怪物死亡后，将该格 `hasMonster` 置为 false，同时 `buildingLayer[x,y].isBuildingBlocked` 自动恢复为 false，建筑立即重新启用。
+
+【6.5 渲染表现】
+  - MonsterFogTilemap (Order=3) 上进行绘制：
+    - 若 `isExplored == false`：在该格渲染全黑的瓦片（黑迷雾）。
+    - 若 `isExplored == true` 且 `hasMonster == true`：在该格渲染半透明的红色闪烁警戒框、带有危险标志的怪物色块或暗色蒙版，以警示该格已被怪物占领。
+    - 若 `isExplored == true` 且 `hasMonster == false`：该格在 MonsterFogTilemap 上的瓦片被清除，显示下方渲染好的地形、资源与建筑层。
+
+═══════════════════════════════════════════════════════════════════
+七、游戏存档系统设计规范（定时自动/手动/退出时存档）
+═══════════════════════════════════════════════════════════════════
+
+为了保证游戏进程的安全，游戏将实现全部三种存档机制：**定时自动存**、**手动存档**和**退出游戏时自动存**。
+
+【7.1 存档保存的内容】
+  存档将采用统一的 JSON 结构进行组织，完整的存档对象 `WorldSaveData` 格式如下：
+  {
+    "saveTime": "2026-05-27 15:00:00",
+    "mapSeed": 114514,
+    "currentTickId": 9845,
+    "playerResources": {
+      "gold": 5400,
+      "wood": 1200,
+      "stone": 850
+    },
+    "techProgress": {
+      "unlockedTechs": ["AXE_UPGRADE", "BASIC_HOUSING"]
+    },
+    "explorationAndMonsterData": [
+      // 仅存储被修改的格子以极大缩减体积（比如已探索过的、或有怪物状态变化的格子）
+      { "x": 10, "y": 12, "isExplored": true, "hasMonster": false },
+      { "x": 25, "y": 30, "isExplored": true, "hasMonster": true }
+    ],
+    "resourceUpdates": [
+      // 仅存储发生消耗的资源格（如森林密度发生改变的格子）
+      { "x": 15, "y": 20, "forestDensity": 45 }
+    ],
+    "buildings": [
+      // 存储所有已被建造的建筑状态
+      { "x": 15, "y": 20, "type": "LUMBER_CAMP", "level": 1, "isBlocked": false }
+    ],
+    "entities": [
+      // 村民与冒险者的属性、位置、当前AI状态
+      { "id": "VILLAGER_01", "type": "VILLAGER", "x": 98, "y": 102, "hp": 100, "state": "WORKING" }
+    ]
+  }
+
+【7.2 三种存档触发机制的实现】
+  1. **定时自动存 (Autosave at intervals)**:
+     - 频率：游戏运行期间，每隔 5 分钟（300秒）触发一次。
+     - 机制：写入本地的默认自动存档文件 `save_auto.json` 中。
+  2. **手动存档 (Manual save)**:
+     - 触发：玩家点击系统菜单中的“保存游戏”按钮。
+     - 机制：提供 3 个独立的存档槽位（Slot 1, Slot 2, Slot 3），分别写入 `save_slot1.json` 等。
+  3. **退出时存 (Save on exit)**:
+     - 触发：玩家点击“退出并保存”按钮，或者在 Unity `OnApplicationQuit()` 生命周期被触发时。
+     - 机制：保存至 `save_exit.json`。保证再次启动时能完美接续上一次游戏的所有状态。
+
+【7.3 读档数据流】
+  - `SaveLoadManager.cs` 从对应的 JSON 文件中反序列化 `WorldSaveData`。
+  - 1. 获取 `mapSeed` 并调用 `MapGenerator` 瞬间重新生成底层的静态地形（第一层）。
+  - 2. 读取资源开采及森林消耗记录，覆盖第二层。
+  - 3. 将序列化的建筑全部摆放并同步给后端，覆盖第三层。
+  - 4. 将玩家的探索迷雾状态 `isExplored` 以及怪物占领状态 `hasMonster` 还原，覆盖第四层。
+  - 5. 通知 `MapRenderer.cs` 全量重绘地图。
+  - 6. 还原玩家的物资、科技、角色位置等所有动态数据。
+
+═══════════════════════════════════════════════════════════════════
+八、MapGenerator.cs 与 MapRenderer.cs 执行与渲染顺序
+═══════════════════════════════════════════════════════════════════
+
+【8.1 完整执行生命周期】
+  1. `Start()` 时，检测是否是新游戏：
+     - 若为**新游戏**：直接读取配置，通过噪声算法完全生成底层的 TerrainLayer、ResourceLayer、预置 BuildingLayer 和 MonsterFogLayer。
+     - 若为**载入存档**：读取存档 JSON，首先按 `mapSeed` 重建地形，然后用存档数据覆盖各层中改变的值。
+  2. 初始化 `StaticClimateController` 并将其注入到 `MapDataStore.Instance.climateController` 中，作为气候偏向数据的读取源，为后续 DynamicSeason 的慢速接入做好准备。
+  3. 生成或还原完毕后，触发 `MapRenderer.Instance.RenderAllLayers()` 渲染全部四层 Tilemap。
+
+【8.2 地图渲染性能优化设计】
+  - 性能备选优化（v2，视口裁剪机制）：
+    - 实现视口 Culling：仅为摄像机视口（Viewport）内的格子（加上视口边缘向外扩展 15 格的安全余量，约 50×50 的区域）调用 `SetTile`。当摄像机移动时，动态更新新入与出界瓦片，这能将渲染压力骤降 90% 以上。
+
+═══════════════════════════════════════════════════════════════════
+九、已达成一致的设计冲突汇总与解答
+═══════════════════════════════════════════════════════════════════
+
+【关于冲突 2 的最终决议：刷怪、占领与建筑互斥】
+  - 决议：开图时怪物就刷新在地图各个危险区，并隐藏在黑雾中。
+  - 玩家走到该格子并清怪前，**被怪物占据的格子绝不允许建造建筑**。
+  - 游戏运行中，Boss 会发出怪物浪潮重新占据格子（`hasMonster` 置为 true）。
+  - 若已建有建筑的格子被怪物重新占据，**该建筑被冻结禁用，所有收益归零**。
+  - 玩家必须派遣冒险者前去杀怪，清空后才可恢复建筑的运作。
+
+【关于冲突 3 的最终决议：静态与动态季节气候】
+  - 决议：首先实现静态气候，即温度、湿度场只在生成地图时依据柏林噪声计算并存储。
+  - **规范化接口**：建立 `IClimateController` 控制器接口，在 MapDataStore 中保留获取当前格气候的入口。当未来制作“动态季节系统”时，只需新建并注入一个支持动态修改 Temperature 的 `SeasonClimateController`，无需更改任何渲染或天灾逻辑。
+
+【关于冲突 4 的最终决议：四层 Tilemap 层级】
+  - 决议：严格使用 4 个独立的 Tilemap 游戏节点，层层重叠，通过指定 Order in Layer 确保：
+    TerrainTilemap (0) -> ResourceTilemap (1) -> BuildingTilemap (2) -> MonsterFogTilemap (3)。
+
+【关于冲突 5 的最终决议：全图渲染卡顿】
+  - 决议：优先用全量渲染进行快速成型与验证。如果性能测试中遇到掉帧，则在 MapRenderer 中启用“摄像机视口裁剪（Culling）”，仅按需渲染视口内可见的瓦片。
+
+【关于探索迷雾的归属决议】
+  - 决议：探索迷雾系统（`isExplored`）直接作为第四层（MonsterFogLayer，Order=3）的一部分进行监管和保存，不单独开设第五层，以精简 Tilemap 架构。
+
+【关于存档机制的决议】
+  - 决议：三种存档触发方式全都要。开发 `SaveLoadManager` 提供统一序列化流程，确保自动存档（定时 5 分钟）、手动存档（3个槽位）、以及退出时存档数据完备无缺。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【说明书说明结束 · 您的完美开发手册 v2.1】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

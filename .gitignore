@@ -1,0 +1,29 @@
+# Ignore Unity directories anywhere in the repository
+[L|l]ibrary/
+[T|t]emp/
+[O|o]bj/
+[B|b]uild/
+[B|b]uilds/
+[L|l]ogs/
+[U|u]ser[S|s]ettings/
+[M|m]emoryCaptures/
+systemp/
+
+# Visual Studio / MonoDevelop / Rider generated files
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.class
+*.targets
+
+# OS generated files
+.DS_Store
+Thumbs.db
